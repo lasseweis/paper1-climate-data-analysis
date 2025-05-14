@@ -10,7 +10,7 @@ ENV/
 env/
 env.bak/
 venv.bak/
-*.log # Log-Dateien (Sie könnten sie auch behalten, wenn sie klein sind)
+#*.log # Log-Dateien (Sie könnten sie auch behalten, wenn sie klein sind)
 
 # Jupyter Notebook Checkpoints
 .ipynb_checkpoints/

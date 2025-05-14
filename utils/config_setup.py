@@ -45,6 +45,17 @@ class Config:
     CMIP6_DATA_BASE_PATH = '/data/users/vlw/paper1-cmip-data'
     CMIP6_VAR_PATH = os.path.join(CMIP6_DATA_BASE_PATH, '{variable}') # Subfolder per variable
     CMIP6_FILE_PATTERN = '{variable}_Amon_{model}_{experiment}_{member}_{grid}_*.nc'
+    CMIP6_MODELS_TO_RUN_LIST = [
+        'ACCESS-CM2',
+        'ACCESS-ESM1-5',
+        'AWI-CM-1-1-MR',
+        'AWI-ESM-1-1-LR',
+        'BCC-CSM2-MR',
+        'BCC-ESM1',
+        'CAMS-CSM1-0',
+        'CAS-ESM2-0',
+        'CESM2-WACCM',
+    ]
 
 
     # --- Analysis Parameters ---

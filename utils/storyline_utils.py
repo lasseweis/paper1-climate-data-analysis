@@ -111,7 +111,7 @@ class StorylineAnalyzer:
 
         # Find historical files
         hist_files_list = self._find_cmip_files(variable_name_str, self.config.CMIP6_HISTORICAL_EXPERIMENT_NAME,
-                                                model_name=model_name_str, member=ensemble_member)
+                                                model_name=model_name_str, member_id=ensemble_member)
         if not hist_files_list:
             logging.warning(f"  No historical files found for {variable_name_str}, {model_name_str}. GWL calculations might fail.")
         all_model_files.extend(hist_files_list)
@@ -119,7 +119,7 @@ class StorylineAnalyzer:
         # Find scenario files
         for scenario_name in scenarios_to_include:
             scenario_files_list = self._find_cmip_files(variable_name_str, scenario_name,
-                                                       model_name=model_name_str, member=ensemble_member)
+                                                       model_name=model_name_str, member_id=ensemble_member)
             if not scenario_files_list:
                 logging.warning(f"  No {scenario_name} files found for {variable_name_str}, {model_name_str}.")
             all_model_files.extend(scenario_files_list)
@@ -302,62 +302,96 @@ class StorylineAnalyzer:
             logging.error("  GWL Thresholds: Input global mean temperature DataArray is None or empty.")
             return None
 
-        # Ensure it's a 1D time series with a 'year' coordinate for annual operations
-        if 'year' not in model_global_mean_tas_da.coords:
-            if 'time' in model_global_mean_tas_da.coords:
-                try:
-                    annual_mean_tas = model_global_mean_tas_da.groupby('time.year').mean(dim='time', skipna=True)
-                    if 'year' not in annual_mean_tas.coords: # groupby should create 'year' dim
-                        annual_mean_tas = annual_mean_tas.rename({'year':'year_dim'}).assign_coords(year=('year_dim',annual_mean_tas.year_dim.data))
+        # --- Beginn der angepassten Logik zur Erstellung von annual_mean_tas ---
+        # model_global_mean_tas_da kommt von _load_and_preprocess_model_data und ist monatlich
+        # mit einer 'time'-Dimension und 'year' als zugewiesener Koordinate.
 
-                except Exception as e_annual:
-                    logging.error(f"  GWL Thresholds: Failed to calculate annual mean from time series: {e_annual}")
-                    return None
-            else:
-                logging.error("  GWL Thresholds: Input TAS DataArray needs 'time' or 'year' coordinate.")
+        model_name_for_log = model_global_mean_tas_da.attrs.get('model_name', 'Unknown Model') # Für bessere Log-Nachrichten
+
+        if 'time' in model_global_mean_tas_da.dims:
+            # Wenn 'time' eine Dimension ist, gehen wir davon aus, dass es sich um subjährliche Daten handelt (z.B. monatlich)
+            # und berechnen den jährlichen Mittelwert.
+            logging.debug(f"  GWL Thresholds: Input data for model '{model_name_for_log}' has 'time' dimension. Calculating annual means using 'time.dt.year'.")
+            try:
+                # Gruppieren nach dem Jahr der 'time'-Koordinate und Mittelwertbildung über die 'time'-Dimension
+                annual_mean_tas = model_global_mean_tas_da.groupby(model_global_mean_tas_da.time.dt.year).mean(dim='time', skipna=True)
+                # Das Ergebnis von groupby(model_global_mean_tas_da.time.dt.year) sollte 'year' als Dimension und Koordinate haben.
+                
+                # Überprüfen und ggf. korrigieren, falls 'year' nicht wie erwartet gesetzt wurde:
+                if 'year' not in annual_mean_tas.dims:
+                    if 'year' in annual_mean_tas.coords: # Wenn 'year' Koordinate aber keine Dimension ist
+                        logging.warning(f"  GWL Thresholds: 'year' is a coordinate but not a dimension after groupby for model '{model_name_for_log}'. Attempting to set_index.")
+                        annual_mean_tas = annual_mean_tas.set_index(year='year') # Macht 'year' zur Dimension
+                    else:
+                        logging.error(f"  GWL Thresholds: 'year' dimension could not be established after annual mean calculation for model '{model_name_for_log}'. Dims: {annual_mean_tas.dims}")
+                        return None 
+                elif 'year' not in annual_mean_tas.coords: # Wenn 'year' Dimension aber keine Koordinate ist
+                     logging.warning(f"  GWL Thresholds: 'year' is a dimension but not a coordinate after groupby for model '{model_name_for_log}'. Attempting to assign coordinate.")
+                     annual_mean_tas = annual_mean_tas.assign_coords(year=annual_mean_tas.year)
+
+            except Exception as e_annual:
+                logging.error(f"  GWL Thresholds: Failed to calculate annual mean from time series for model '{model_name_for_log}': {e_annual}")
                 return None
-        else: # Already has 'year' coordinate (likely already annual)
-             annual_mean_tas = model_global_mean_tas_da
-             if 'year' not in annual_mean_tas.dims: # Ensure 'year' is also a dimension for .sel
-                  annual_mean_tas = annual_mean_tas.swap_dims({annual_mean_tas.dims[0]: 'year'}) if len(annual_mean_tas.dims)==1 else annual_mean_tas
-
+        elif 'year' in model_global_mean_tas_da.dims:
+            # Wenn 'year' bereits eine Dimension ist, nehmen wir an, es ist bereits eine jährliche Zeitreihe
+            logging.debug(f"  GWL Thresholds: Input data for model '{model_name_for_log}' already has 'year' dimension. Assuming it's annual.")
+            annual_mean_tas = model_global_mean_tas_da
+            # Sicherstellen, dass 'year' auch eine Koordinate ist, wenn es eine Dimension ist
+            if 'year' not in annual_mean_tas.coords:
+                logging.warning(f"  GWL Thresholds: 'year' is a dimension but not a coordinate for model '{model_name_for_log}'. Assigning coordinate from dimension.")
+                annual_mean_tas = annual_mean_tas.assign_coords(year=annual_mean_tas.year)
+        else:
+            logging.error(f"  GWL Thresholds: Input TAS DataArray for model '{model_name_for_log}' needs a 'time' or 'year' dimension.")
+            return None
+        # --- Ende der angepassten Logik ---
 
         # Calculate pre-industrial baseline mean
         ref_start, ref_end = pre_industrial_period_tuple
         try:
+            # annual_mean_tas sollte jetzt eine 'year'-Dimension und -Koordinate haben, die für .sel geeignet ist
             tas_pre_industrial_slice = annual_mean_tas.sel(year=slice(ref_start, ref_end))
             if tas_pre_industrial_slice.year.size == 0:
                 min_yr_data, max_yr_data = annual_mean_tas.year.min().item(), annual_mean_tas.year.max().item()
-                logging.error(f"  GWL Thresholds: No data in pre-industrial reference period ({ref_start}-{ref_end}). "
+                logging.error(f"  GWL Thresholds: No data in pre-industrial reference period ({ref_start}-{ref_end}) for model '{model_name_for_log}'. "
                               f"Data available: {min_yr_data}-{max_yr_data}.")
                 return None
             pre_industrial_baseline_temp = tas_pre_industrial_slice.mean(dim='year', skipna=True).item()
         except Exception as e_baseline:
-            logging.error(f"  GWL Thresholds: Error calculating pre-industrial baseline: {e_baseline}")
+            logging.error(f"  GWL Thresholds: Error calculating pre-industrial baseline for model '{model_name_for_log}': {e_baseline}")
             return None
 
         # Calculate temperature anomaly relative to baseline
         temperature_anomaly = annual_mean_tas - pre_industrial_baseline_temp
         
         # Smooth the anomaly series
+        # Sicherstellen, dass 'year' die Dimension für rolling() ist
+        if 'year' not in temperature_anomaly.dims:
+            logging.error(f"  GWL Thresholds: 'year' is not a dimension in temperature_anomaly for model '{model_name_for_log}'. Cannot apply rolling mean. Dims: {temperature_anomaly.dims}")
+            return gwl_crossing_years # Mit Nones zurückgeben
+
         smoothed_anomaly = temperature_anomaly.rolling(year=smoothing_window_years, center=True).mean().dropna(dim='year')
         if smoothed_anomaly.size == 0:
-            logging.warning("  GWL Thresholds: Smoothed anomaly series is empty (e.g., not enough data for rolling window).")
-            return gwl_crossing_years # Return with Nones
+            logging.warning(f"  GWL Thresholds: Smoothed anomaly series is empty for model '{model_name_for_log}' (e.g., not enough data for rolling window).")
+            return gwl_crossing_years # Mit Nones zurückgeben
 
         # Find the first year each GWL is exceeded
         try:
             for gwl_target in global_warming_levels_list:
+                # Sicherstellen, dass 'year' eine Koordinate in smoothed_anomaly ist
+                if 'year' not in smoothed_anomaly.coords:
+                    logging.error(f"  GWL Thresholds: 'year' coordinate missing in smoothed_anomaly for model '{model_name_for_log}'.")
+                    continue # Nächste GWL-Stufe versuchen oder Fehler höher propagieren
+
                 years_exceeding_gwl = smoothed_anomaly.where(smoothed_anomaly > gwl_target, drop=True).year
                 if years_exceeding_gwl.size > 0:
                     first_year = int(years_exceeding_gwl.min().item())
                     gwl_crossing_years[gwl_target] = first_year
-                    logging.info(f"      GWL {gwl_target}°C first exceeded in year: {first_year}")
+                    logging.info(f"      GWL {gwl_target}°C first exceeded in year: {first_year} for model '{model_name_for_log}'")
                 else:
-                    logging.info(f"      GWL {gwl_target}°C not exceeded in the smoothed timeseries.")
+                    logging.info(f"      GWL {gwl_target}°C not exceeded in the smoothed timeseries for model '{model_name_for_log}'.")
             return gwl_crossing_years
         except Exception as e_find_gwl:
-            logging.error(f"  GWL Thresholds: Error finding GWL crossing years: {e_find_gwl}")
+            logging.error(f"  GWL Thresholds: Error finding GWL crossing years for model '{model_name_for_log}': {e_find_gwl}")
             return None
 
 
