@@ -38,7 +38,7 @@ class Config:
 
     # AMO index path (Example using a subfolder 'data' in project dir, or adjust)
     _PROJECT_DATA_DIR = os.path.join(PROJECT_BASE_DIR, 'data') # Example for project-specific data
-    AMO_INDEX_FILE = os.path.join(_PROJECT_DATA_DIR, 'CMIP6-datasets', 'amo_index.csv')
+    AMO_INDEX_FILE = os.path.join(os.path.dirname(PROJECT_BASE_DIR), 'CMIP6-datasets', 'amo_index.csv')
 
     # CMIP6 Data Paths (KEEPING ABSOLUTE - LIKELY DIFFERENT FILESYSTEM)
     # **** USER: Please verify this path ****
