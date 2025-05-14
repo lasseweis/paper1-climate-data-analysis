@@ -133,41 +133,33 @@ class StorylineAnalyzer:
 
         combined_ds = None
         try:
-            # Define preprocess function for open_mfdataset, especially for level selection
             preprocess_func = None
             if variable_name_str == 'ua' and target_level_hpa is not None:
-                # select_level_preprocess is imported from data_utils
                 preprocess_func = lambda ds_chunk: select_level_preprocess(ds_chunk, level_hpa=target_level_hpa)
                 logging.info(f"  Using preprocessing to select level {target_level_hpa} hPa for 'ua'.")
 
-            # Load and combine datasets
-            # Using 'by_coords' is generally safer for CMIP data with varying time coords.
-            # Using 'nested' and 'time' can also work if time coordinates are consistent or can be made so.
             combined_ds = xr.open_mfdataset(
                 unique_files,
                 preprocess=preprocess_func,
-                combine='by_coords', # Attempts to align coordinates
-                parallel=False, # Set to True if dask is configured and beneficial
+                combine='by_coords', 
+                parallel=False, 
                 engine='netcdf4',
                 decode_times=True,
                 use_cftime=True,
-                coords='minimal', # Keep only essential coordinates
-                data_vars='minimal', # Keep only essential data variables
-                compat='override', # Override conflicting attributes
-                chunks={'time': 120} # Example chunking for time
+                coords='minimal', 
+                data_vars='minimal', 
+                compat='override', 
+                chunks={'time': 120} 
             )
 
-            # Determine the actual variable name in the loaded dataset
-            # (e.g. 'tas' for 'tas_global', or 'ua'/'u'/'uwnd' for 'ua')
             actual_var_in_ds = None
             if variable_name_str == 'tas_global': actual_var_in_ds = 'tas'
             elif variable_name_str == 'ua':
                 actual_var_in_ds = next((name for name in ['ua', 'u', 'uwnd'] if name in combined_ds.data_vars), None)
-            else: # for 'pr', 'tas'
+            else: 
                 actual_var_in_ds = variable_name_str
             
             if not actual_var_in_ds or actual_var_in_ds not in combined_ds.data_vars:
-                 # Attempt fallback for common alternative names
                 alt_names_map = {'pr': ['prate'], 'tas': ['t2m', 'air']}
                 if variable_name_str in alt_names_map:
                     for alt_name in alt_names_map[variable_name_str]:
@@ -181,13 +173,11 @@ class StorylineAnalyzer:
             
             data_array_var = combined_ds[actual_var_in_ds]
 
-            # Standardize coordinate names
             coord_renames = {'latitude': 'lat', 'longitude': 'lon', 'plev': 'lev'}
             current_renames = {k: v for k, v in coord_renames.items() if k in data_array_var.dims or k in data_array_var.coords}
             if current_renames:
                 data_array_var = data_array_var.rename(current_renames)
 
-            # Time coordinate processing (uniqueness, monotonicity)
             if 'time' not in data_array_var.coords:
                 raise ValueError("  Critical: 'time' coordinate missing after loading.")
             if not data_array_var.indexes['time'].is_unique:
@@ -198,13 +188,11 @@ class StorylineAnalyzer:
                 logging.info(f"  Sorting time coordinate for {model_name_str}/{variable_name_str}.")
                 data_array_var = data_array_var.sortby('time')
             
-            # Assign year and month coordinates for convenience
             data_array_var = data_array_var.assign_coords(
                 year=("time", data_array_var.time.dt.year.values),
                 month=("time", data_array_var.time.dt.month.values)
             )
 
-            # Unit conversions
             if variable_name_str == 'pr' and 'units' in data_array_var.attrs:
                 if 'kg' in data_array_var.attrs['units'].lower() and 's-1' in data_array_var.attrs['units'].lower():
                     logging.info(f"  Converting precipitation units from {data_array_var.attrs['units']} to mm/day.")
@@ -216,12 +204,12 @@ class StorylineAnalyzer:
                     data_array_var = data_array_var - 273.15
                     data_array_var.attrs['units'] = '°C'
 
-            # Spatial processing: longitude normalization for regional, global mean for 'tas_global'
-            if variable_name_str in ['pr', 'tas', 'ua']: # Regional variables that might need lon normalization
+            if variable_name_str in ['pr', 'tas', 'ua']: 
                 if 'lon' in data_array_var.coords and np.any(data_array_var['lon'] > 180):
                     logging.info(f"  Normalizing longitude from 0-360 to -180-180 for {model_name_str}/{variable_name_str}.")
                     data_array_var = data_array_var.assign_coords(lon=(((data_array_var.lon + 180) % 360) - 180)).sortby('lon')
             
+            # ----- START MODIFICATION FOR tas_global -----
             if variable_name_str == 'tas_global':
                 if 'lat' in data_array_var.dims and 'lon' in data_array_var.dims:
                     logging.info(f"  Calculating global mean for tas_global ({model_name_str})...")
@@ -229,25 +217,43 @@ class StorylineAnalyzer:
                     weights.name = "weights"
                     global_mean_tas = data_array_var.weighted(weights).mean(("lon", "lat"), skipna=True)
                     
-                    # Ensure result is 1D (time)
-                    dims_to_remove_from_global_mean = [d for d in global_mean_tas.dims if d != 'time']
-                    if dims_to_remove_from_global_mean:
-                        global_mean_tas = global_mean_tas.squeeze(dims_to_remove_from_global_mean, drop=True)
-                    
-                    if set(global_mean_tas.dims) != {'time'}:
-                         raise ValueError(f"Global mean 'tas_global' could not be reduced to 1D time series. Dims: {global_mean_tas.dims}")
+                    logging.debug(f"  DEBUG (_load_and_preprocess_model_data, {model_name_str}): Global mean tas_global before explicit processing: {global_mean_tas.dims}, {global_mean_tas.shape}")
+
+                    target_dims_for_global_mean = ['time']
+                    current_dims_of_global_mean = list(global_mean_tas.dims)
+                    dims_to_explicitly_remove = [d for d in current_dims_of_global_mean if d not in target_dims_for_global_mean]
+
+                    if dims_to_explicitly_remove:
+                        logging.info(f"  Explicitly removing dimensions {dims_to_explicitly_remove} and their coordinates from global_mean_tas for {model_name_str}.")
+                        coords_to_drop_with_dims = [coord for coord in global_mean_tas.coords if coord in dims_to_explicitly_remove and coord != 'time']
+                        if coords_to_drop_with_dims:
+                            try:
+                                global_mean_tas = global_mean_tas.drop_vars(coords_to_drop_with_dims, errors='ignore')
+                                logging.debug(f"    Dropped coordinates: {coords_to_drop_with_dims}")
+                            except Exception as e_drop_vars:
+                                logging.warning(f"    Could not drop coordinates {coords_to_drop_with_dims}: {e_drop_vars}")
+                        
+                        global_mean_tas = global_mean_tas.squeeze(dim=dims_to_explicitly_remove, drop=True)
+                        logging.debug(f"  DEBUG (_load_and_preprocess_model_data, {model_name_str}): Global mean tas_global after explicit processing: {global_mean_tas.dims}, {global_mean_tas.shape}")
+
+                    if set(global_mean_tas.dims) != set(target_dims_for_global_mean):
+                         raise ValueError(f"Global mean 'tas_global' for {model_name_str} could not be reduced to 1D time series. Dims: {global_mean_tas.dims}")
                     data_array_var = global_mean_tas
-                elif not ('lat' in data_array_var.dims and 'lon' in data_array_var.dims):
+                elif not ('lat' in data_array_var.dims and 'lon' in data_array_var.dims): # If already (seemingly) globally averaged
                     logging.warning(f"  'tas_global' for {model_name_str} already seems globally averaged or is missing lat/lon dims. "
                                     f"Current dims: {data_array_var.dims}. Ensuring it's 1D (time).")
                     non_time_dims = [dim for dim in data_array_var.dims if dim != 'time']
                     if non_time_dims:
+                        # Drop associated coordinates first if they are not dimensions anymore
+                        coords_to_drop = [coord for coord in data_array_var.coords if coord in non_time_dims and coord != 'time']
+                        if coords_to_drop:
+                            data_array_var = data_array_var.drop_vars(coords_to_drop, errors='ignore')
                         data_array_var = data_array_var.squeeze(dim=non_time_dims, drop=True)
                     if set(data_array_var.dims) != {'time'}:
-                        raise ValueError(f"Pre-averaged 'tas_global' could not be reduced to 1D. Dims: {data_array_var.dims}")
+                        raise ValueError(f"Pre-averaged 'tas_global' for {model_name_str} could not be reduced to 1D. Dims: {data_array_var.dims}")
+            # ----- END MODIFICATION FOR tas_global -----
             
-            # Filter time to a maximum year (e.g., 2300) to avoid issues with very long runs if not needed
-            max_year_to_keep = 2300 # Or from Config if defined
+            max_year_to_keep = 2300 
             if 'time' in data_array_var.coords:
                 original_time_size = data_array_var.time.size
                 years_present = data_array_var.time.dt.year
@@ -259,11 +265,13 @@ class StorylineAnalyzer:
                 else:
                     logging.warning(f"  No data found up to year {max_year_to_keep} for {model_name_str}/{variable_name_str}.")
             
-            # Final check and load
             if data_array_var is not None and data_array_var.size > 0:
+                # ----- START MODIFICATION: ADD model_name ATTRIBUTE -----
+                data_array_var.attrs['model_name'] = model_name_str
+                # ----- END MODIFICATION: ADD model_name ATTRIBUTE -----
                 logging.info(f"  Successfully loaded and preprocessed {variable_name_str} for {model_name_str}. Time range: "
                              f"{data_array_var.time.min().dt.strftime('%Y-%m').item()} to {data_array_var.time.max().dt.strftime('%Y-%m').item()}")
-                return data_array_var.load() # Load into memory
+                return data_array_var.load() 
             else:
                 logging.warning(f"  No data after preprocessing for {variable_name_str}, {model_name_str}.")
                 return None
@@ -302,85 +310,124 @@ class StorylineAnalyzer:
             logging.error("  GWL Thresholds: Input global mean temperature DataArray is None or empty.")
             return None
 
+        # ----- START MODIFICATION: ADD model_name AND SAFETY CHECK FOR SPATIAL MEAN -----
+        model_name_for_log = model_global_mean_tas_da.attrs.get('model_name', 'Unknown Model')
+        logging.info(f"  GWL Thresholds: Processing model '{model_name_for_log}'") # Logging des Modellnamens
+        
+        global_tas_for_gwl = model_global_mean_tas_da.copy() # Arbeite mit einer Kopie
+
+        # Zusätzlicher Sicherheitscheck für räumliche Mittelung (inspiriert von paper1.py)
+        spatial_dims_found = [dim for dim in ['lat', 'lon', 'latitude', 'longitude'] if dim in global_tas_for_gwl.dims]
+        if spatial_dims_found:
+            logging.warning(f"  GWL Thresholds ({model_name_for_log}): Input 'model_global_mean_tas_da' hat noch räumliche Dimensionen: {spatial_dims_found}. Versuche erneute Mittelung.")
+            try:
+                # Versuche, die Standard-Koordinatennamen zu verwenden
+                lat_coord_name = 'lat' if 'lat' in global_tas_for_gwl.coords else 'latitude' if 'latitude' in global_tas_for_gwl.coords else None
+                lon_coord_name = 'lon' if 'lon' in global_tas_for_gwl.coords else 'longitude' if 'longitude' in global_tas_for_gwl.coords else None
+
+                if lat_coord_name and lon_coord_name and lat_coord_name in global_tas_for_gwl.dims and lon_coord_name in global_tas_for_gwl.dims:
+                    weights_check = np.cos(np.deg2rad(global_tas_for_gwl[lat_coord_name]))
+                    weights_check.name = "weights"
+                    # Stelle sicher, dass Gewichte nur von der Lat-Dimension abhängen
+                    if set(weights_check.dims) == {lat_coord_name}:
+                        global_tas_mean_check = global_tas_for_gwl.weighted(weights_check).mean(dim=[lon_coord_name, lat_coord_name], skipna=True)
+                    else:
+                        logging.warning(f"  GWL Thresholds ({model_name_for_log}): Gewichte haben unerwartete Dimensionen {weights_check.dims}. Nutze ungewichteten Mittelwert.")
+                        global_tas_mean_check = global_tas_for_gwl.mean(dim=[lon_coord_name, lat_coord_name], skipna=True)
+                else: # Generischer Fall, wenn lat/lon nicht als Koordinaten standardisiert sind oder nicht Dimensionen sind
+                    logging.warning(f"  GWL Thresholds ({model_name_for_log}): Standard lat/lon Koordinaten/Dimensionen nicht für gewichteten Mittelwert gefunden. Nutze generischen Mittelwert über {spatial_dims_found}.")
+                    global_tas_mean_check = global_tas_for_gwl.mean(dim=spatial_dims_found, skipna=True)
+                
+                global_tas_for_gwl = global_tas_mean_check
+                logging.debug(f"  GWL Thresholds ({model_name_for_log}): Nach erneutem Mitteln, Dimensionen: {global_tas_for_gwl.dims}")
+            except Exception as e_remiddle:
+                logging.error(f"  GWL Thresholds ({model_name_for_log}): Fehler beim erneuten Mitteln: {e_remiddle}. Fahre mit potenziell ungemittelten Daten fort.")
+        
+        # Verwende global_tas_for_gwl für die weitere Berechnung
+        # ----- END MODIFICATION -----
+
         # --- Beginn der angepassten Logik zur Erstellung von annual_mean_tas ---
-        # model_global_mean_tas_da kommt von _load_and_preprocess_model_data und ist monatlich
+        # global_tas_for_gwl kommt von _load_and_preprocess_model_data und ist monatlich
         # mit einer 'time'-Dimension und 'year' als zugewiesener Koordinate.
+        # ODER wurde gerade oben nochmal gemittelt.
 
-        model_name_for_log = model_global_mean_tas_da.attrs.get('model_name', 'Unknown Model') # Für bessere Log-Nachrichten
-
-        if 'time' in model_global_mean_tas_da.dims:
-            # Wenn 'time' eine Dimension ist, gehen wir davon aus, dass es sich um subjährliche Daten handelt (z.B. monatlich)
-            # und berechnen den jährlichen Mittelwert.
+        if 'time' in global_tas_for_gwl.dims:
             logging.debug(f"  GWL Thresholds: Input data for model '{model_name_for_log}' has 'time' dimension. Calculating annual means using 'time.dt.year'.")
             try:
-                # Gruppieren nach dem Jahr der 'time'-Koordinate und Mittelwertbildung über die 'time'-Dimension
-                annual_mean_tas = model_global_mean_tas_da.groupby(model_global_mean_tas_da.time.dt.year).mean(dim='time', skipna=True)
-                # Das Ergebnis von groupby(model_global_mean_tas_da.time.dt.year) sollte 'year' als Dimension und Koordinate haben.
+                annual_mean_tas = global_tas_for_gwl.groupby(global_tas_for_gwl.time.dt.year).mean(dim='time', skipna=True)
                 
-                # Überprüfen und ggf. korrigieren, falls 'year' nicht wie erwartet gesetzt wurde:
                 if 'year' not in annual_mean_tas.dims:
-                    if 'year' in annual_mean_tas.coords: # Wenn 'year' Koordinate aber keine Dimension ist
+                    if 'year' in annual_mean_tas.coords: 
                         logging.warning(f"  GWL Thresholds: 'year' is a coordinate but not a dimension after groupby for model '{model_name_for_log}'. Attempting to set_index.")
-                        annual_mean_tas = annual_mean_tas.set_index(year='year') # Macht 'year' zur Dimension
+                        annual_mean_tas = annual_mean_tas.set_index(year='year') 
                     else:
                         logging.error(f"  GWL Thresholds: 'year' dimension could not be established after annual mean calculation for model '{model_name_for_log}'. Dims: {annual_mean_tas.dims}")
                         return None 
-                elif 'year' not in annual_mean_tas.coords: # Wenn 'year' Dimension aber keine Koordinate ist
+                elif 'year' not in annual_mean_tas.coords: 
                      logging.warning(f"  GWL Thresholds: 'year' is a dimension but not a coordinate after groupby for model '{model_name_for_log}'. Attempting to assign coordinate.")
                      annual_mean_tas = annual_mean_tas.assign_coords(year=annual_mean_tas.year)
 
             except Exception as e_annual:
                 logging.error(f"  GWL Thresholds: Failed to calculate annual mean from time series for model '{model_name_for_log}': {e_annual}")
                 return None
-        elif 'year' in model_global_mean_tas_da.dims:
-            # Wenn 'year' bereits eine Dimension ist, nehmen wir an, es ist bereits eine jährliche Zeitreihe
+        elif 'year' in global_tas_for_gwl.dims:
             logging.debug(f"  GWL Thresholds: Input data for model '{model_name_for_log}' already has 'year' dimension. Assuming it's annual.")
-            annual_mean_tas = model_global_mean_tas_da
-            # Sicherstellen, dass 'year' auch eine Koordinate ist, wenn es eine Dimension ist
+            annual_mean_tas = global_tas_for_gwl
             if 'year' not in annual_mean_tas.coords:
                 logging.warning(f"  GWL Thresholds: 'year' is a dimension but not a coordinate for model '{model_name_for_log}'. Assigning coordinate from dimension.")
                 annual_mean_tas = annual_mean_tas.assign_coords(year=annual_mean_tas.year)
         else:
-            logging.error(f"  GWL Thresholds: Input TAS DataArray for model '{model_name_for_log}' needs a 'time' or 'year' dimension.")
+            logging.error(f"  GWL Thresholds: Input TAS DataArray for model '{model_name_for_log}' needs a 'time' or 'year' dimension. Dims: {global_tas_for_gwl.dims}")
             return None
         # --- Ende der angepassten Logik ---
 
-        # Calculate pre-industrial baseline mean
         ref_start, ref_end = pre_industrial_period_tuple
         try:
-            # annual_mean_tas sollte jetzt eine 'year'-Dimension und -Koordinate haben, die für .sel geeignet ist
             tas_pre_industrial_slice = annual_mean_tas.sel(year=slice(ref_start, ref_end))
             if tas_pre_industrial_slice.year.size == 0:
                 min_yr_data, max_yr_data = annual_mean_tas.year.min().item(), annual_mean_tas.year.max().item()
                 logging.error(f"  GWL Thresholds: No data in pre-industrial reference period ({ref_start}-{ref_end}) for model '{model_name_for_log}'. "
                               f"Data available: {min_yr_data}-{max_yr_data}.")
                 return None
-            pre_industrial_baseline_temp = tas_pre_industrial_slice.mean(dim='year', skipna=True).item()
+            
+            # ----- START MODIFICATION: DEBUG BEFORE .item() -----
+            baseline_mean_da = tas_pre_industrial_slice.mean(dim='year', skipna=True)
+            logging.debug(f"  GWL DEBUG ({model_name_for_log}): Baseline mean DataArray before .item(): {baseline_mean_da}")
+            logging.debug(f"  GWL DEBUG ({model_name_for_log}): Dimensions: {baseline_mean_da.dims}, Shape: {baseline_mean_da.shape}, Size: {baseline_mean_da.size}")
+            
+            if baseline_mean_da.size != 1:
+                logging.error(f"  GWL ERROR ({model_name_for_log}): Baseline mean is not a scalar before .item()! Size: {baseline_mean_da.size}. Data: {baseline_mean_da.data}")
+                # Option: Versuchen, trotzdem einen Wert zu nehmen, wenn es nur eine nicht-Zeit Dimension ist, die Singleton ist
+                if baseline_mean_da.ndim == 1 and baseline_mean_da.size > 0 : # Z.B. wenn eine `member` Dimension übrig blieb
+                    logging.warning(f"  GWL WARNING ({model_name_for_log}): Baseline mean is 1D with size {baseline_mean_da.size}. Taking the first element.")
+                    pre_industrial_baseline_temp = baseline_mean_da.data[0] # Vorsichtiger Zugriff
+                else:
+                    return None # Sicherer Ausstieg
+            else:
+                pre_industrial_baseline_temp = baseline_mean_da.item()
+            # ----- END MODIFICATION: DEBUG BEFORE .item() -----
+
         except Exception as e_baseline:
             logging.error(f"  GWL Thresholds: Error calculating pre-industrial baseline for model '{model_name_for_log}': {e_baseline}")
+            logging.error(traceback.format_exc()) # Hinzugefügt für mehr Details
             return None
 
-        # Calculate temperature anomaly relative to baseline
         temperature_anomaly = annual_mean_tas - pre_industrial_baseline_temp
         
-        # Smooth the anomaly series
-        # Sicherstellen, dass 'year' die Dimension für rolling() ist
         if 'year' not in temperature_anomaly.dims:
             logging.error(f"  GWL Thresholds: 'year' is not a dimension in temperature_anomaly for model '{model_name_for_log}'. Cannot apply rolling mean. Dims: {temperature_anomaly.dims}")
-            return gwl_crossing_years # Mit Nones zurückgeben
+            return gwl_crossing_years 
 
         smoothed_anomaly = temperature_anomaly.rolling(year=smoothing_window_years, center=True).mean().dropna(dim='year')
         if smoothed_anomaly.size == 0:
             logging.warning(f"  GWL Thresholds: Smoothed anomaly series is empty for model '{model_name_for_log}' (e.g., not enough data for rolling window).")
-            return gwl_crossing_years # Mit Nones zurückgeben
+            return gwl_crossing_years 
 
-        # Find the first year each GWL is exceeded
         try:
             for gwl_target in global_warming_levels_list:
-                # Sicherstellen, dass 'year' eine Koordinate in smoothed_anomaly ist
                 if 'year' not in smoothed_anomaly.coords:
                     logging.error(f"  GWL Thresholds: 'year' coordinate missing in smoothed_anomaly for model '{model_name_for_log}'.")
-                    continue # Nächste GWL-Stufe versuchen oder Fehler höher propagieren
+                    continue 
 
                 years_exceeding_gwl = smoothed_anomaly.where(smoothed_anomaly > gwl_target, drop=True).year
                 if years_exceeding_gwl.size > 0:
@@ -392,6 +439,7 @@ class StorylineAnalyzer:
             return gwl_crossing_years
         except Exception as e_find_gwl:
             logging.error(f"  GWL Thresholds: Error finding GWL crossing years for model '{model_name_for_log}': {e_find_gwl}")
+            logging.error(traceback.format_exc()) # Hinzugefügt für mehr Details
             return None
 
 
@@ -599,8 +647,10 @@ class StorylineAnalyzer:
                 pr_monthly_ts = model_regional_data.get('pr')
                 tas_monthly_ts = model_regional_data.get('tas')
 
-                if not all ([ua_monthly_ts, pr_monthly_ts, tas_monthly_ts]):
-                    logging.warning(f"    Skipping metric calculation for {model_name_iter}: Missing one or more regional variable timeseries.")
+                if ua_monthly_ts is None or ua_monthly_ts.size == 0 or \
+                   pr_monthly_ts is None or pr_monthly_ts.size == 0 or \
+                   tas_monthly_ts is None or tas_monthly_ts.size == 0:
+                    logging.warning(f"    Skipping metric calculation for {model_name_iter}: Missing or empty regional variable timeseries (ua, pr, or tas).")
                     continue
 
                 # Convert monthly to seasonal means (time series over all years)
@@ -608,8 +658,10 @@ class StorylineAnalyzer:
                 pr_seas_mean_fullts = self.data_processor.calculate_seasonal_means(self.data_processor.assign_season_to_dataarray(pr_monthly_ts))
                 tas_seas_mean_fullts = self.data_processor.calculate_seasonal_means(self.data_processor.assign_season_to_dataarray(tas_monthly_ts))
 
-                if not all([ua_seas_mean_fullts, pr_seas_mean_fullts, tas_seas_mean_fullts]):
-                    logging.warning(f"    Skipping metric calculation for {model_name_iter}: Failed to calculate base seasonal mean time series.")
+                if ua_seas_mean_fullts is None or ua_seas_mean_fullts.size == 0 or \
+                   pr_seas_mean_fullts is None or pr_seas_mean_fullts.size == 0 or \
+                   tas_seas_mean_fullts is None or tas_seas_mean_fullts.size == 0:
+                    logging.warning(f"    Skipping metric calculation for {model_name_iter}: Failed to calculate or result is empty for one or more base seasonal mean time series.")
                     continue
                 
                 # Calculate Box Means (time series over all years)

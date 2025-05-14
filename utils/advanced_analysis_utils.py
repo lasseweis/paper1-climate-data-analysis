@@ -857,10 +857,34 @@ class AdvancedAnalyzer:
                         model_nm = model_names_for_var[i] # Get corresponding model name
                         datasets_with_model_dim.append(ds_item.expand_dims(model=[model_nm]))
 
+                    # ANGEPASSTER AUFRUF VON xr.combine_by_coords:
                     combined_ds_for_var = xr.combine_by_coords(
-                        datasets_with_model_dim, compat='override', join='inner', combine_attrs='drop_conflicts'
+                        datasets_with_model_dim,
+                        compat='override',
+                        join='inner',
+                        combine_attrs='drop_conflicts',
+                        coords='minimal'
                     )
+
+                    # NEU: Explizites Sortieren nach der 'lon'-Koordinate, falls vorhanden und eine Dimension ist
+                    # Dies stellt sicher, dass der Index für 'lon' monoton ist, bevor .mean() aufgerufen wird.
+                    # Es wird angenommen, dass die Longituden-Koordinate 'lon' heißt.
+                    if 'lon' in combined_ds_for_var.coords and 'lon' in combined_ds_for_var.dims:
+                        # Überprüfen, ob eine Sortierung notwendig ist (optional, .sortby() ist idempotent)
+                        is_monotonic = False
+                        if 'lon' in combined_ds_for_var.indexes: # Sicherstellen, dass ein Index existiert
+                            idx = combined_ds_for_var.indexes['lon']
+                            is_monotonic = idx.is_monotonic_increasing or idx.is_monotonic_decreasing
+                        
+                        if not is_monotonic:
+                            logging.info(f"    Sorting combined dataset for variable '{var}' by 'lon' coordinate as it's not monotonic.")
+                            combined_ds_for_var = combined_ds_for_var.sortby('lon')
+                        # Alternativ: Immer sortieren, um sicherzugehen (wenn die Überprüfung Probleme macht):
+                        # logging.info(f"    Ensuring combined dataset for variable '{var}' is sorted by 'lon'.")
+                        # combined_ds_for_var = combined_ds_for_var.sortby('lon')
+                    
                     mmm_ds_for_var = combined_ds_for_var.mean(dim='model', skipna=True)
+                   
                     # Ensure the variable exists in the resulting MMM dataset
                     if var in mmm_ds_for_var:
                         mmm_seasonal_hist[var] = mmm_ds_for_var[var]
