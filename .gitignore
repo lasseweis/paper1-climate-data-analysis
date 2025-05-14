@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.env
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+*.log # Log-Dateien (Sie könnten sie auch behalten, wenn sie klein sind)
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+
+# IDE/Editor spezifische Ordner
+.vscode/
+.idea/
+
+# Betriebssystem spezifische Dateien
+.DS_Store
+Thumbs.db
+
+# Grosse Daten-Dateien (fügen Sie hier Muster für Ihre Rohdaten hinzu, falls diese im Projektordner wären)
+# *.nc
+# *.xlsx
+# data/ # Wenn Ihr kompletter Datenordner ignoriert werden soll
+
+# Ergebnis- und Plot-Ordner (optional, aber oft werden nur Skripte versioniert)
+# Sie könnten diese auch behalten, wenn Sie die generierten Ergebnisse versionieren wollen,
+# aber oft sind sie gross und werden bei jedem Lauf neu generiert.
+output_plots_paper1/
+results_intermediate/
+
+# Mamba/Conda environments (falls im Projektordner)
+.mambaenvs/
+mambaenvs/
