@@ -832,76 +832,248 @@ class AdvancedAnalyzer:
         # 2. Calculate Multi-Model Mean (MMM) for the historical seasonal data
         mmm_seasonal_hist = {}
         for var in ['ua', 'pr', 'tas']:
-            datasets_to_combine_for_var = [
-                ds.rename(var) for model, ds in model_seasonal_means_hist[var].items() if ds is not None
-            ] # Ensure DataArrays are named for combining into a Dataset
-            
-            # Convert to datasets before combining if they are DataArrays
-            datasets_as_ds_list = []
-            for da_model in datasets_to_combine_for_var:
-                if isinstance(da_model, xr.DataArray):
-                     # Ensure the DataArray has a name, or assign 'var' as name
-                    name_for_ds = da_model.name if da_model.name else var
-                    datasets_as_ds_list.append(da_model.to_dataset(name=name_for_ds))
-                elif isinstance(da_model, xr.Dataset): # Should not happen if above list comp is correct
-                    datasets_as_ds_list.append(da_model)
+            datasets_to_combine_for_var = []
+            model_names_for_var = [] # Um die Modellnamen parallel zu den Datensätzen zu halten
 
-
-            if len(datasets_as_ds_list) >= 3: # Need at least 3 models for a robust MMM
-                try:
-                    # Add a 'model' dimension to each dataset before combining
-                    datasets_with_model_dim = []
-                    model_names_for_var = [m for m, ds in model_seasonal_means_hist[var].items() if ds is not None]
-                    
-                    for i, ds_item in enumerate(datasets_as_ds_list):
-                        model_nm = model_names_for_var[i] # Get corresponding model name
-                        datasets_with_model_dim.append(ds_item.expand_dims(model=[model_nm]))
-
-                    # ANGEPASSTER AUFRUF VON xr.combine_by_coords:
-                    combined_ds_for_var = xr.combine_by_coords(
-                        datasets_with_model_dim,
-                        compat='override',
-                        join='inner',
-                        combine_attrs='drop_conflicts',
-                        coords='minimal'
-                    )
-
-                    # NEU: Explizites Sortieren nach der 'lon'-Koordinate, falls vorhanden und eine Dimension ist
-                    # Dies stellt sicher, dass der Index für 'lon' monoton ist, bevor .mean() aufgerufen wird.
-                    # Es wird angenommen, dass die Longituden-Koordinate 'lon' heißt.
-                    if 'lon' in combined_ds_for_var.coords and 'lon' in combined_ds_for_var.dims:
-                        # Überprüfen, ob eine Sortierung notwendig ist (optional, .sortby() ist idempotent)
-                        is_monotonic = False
-                        if 'lon' in combined_ds_for_var.indexes: # Sicherstellen, dass ein Index existiert
-                            idx = combined_ds_for_var.indexes['lon']
-                            is_monotonic = idx.is_monotonic_increasing or idx.is_monotonic_decreasing
-                        
-                        if not is_monotonic:
-                            logging.info(f"    Sorting combined dataset for variable '{var}' by 'lon' coordinate as it's not monotonic.")
-                            combined_ds_for_var = combined_ds_for_var.sortby('lon')
-                        # Alternativ: Immer sortieren, um sicherzugehen (wenn die Überprüfung Probleme macht):
-                        # logging.info(f"    Ensuring combined dataset for variable '{var}' is sorted by 'lon'.")
-                        # combined_ds_for_var = combined_ds_for_var.sortby('lon')
-                    
-                    mmm_ds_for_var = combined_ds_for_var.mean(dim='model', skipna=True)
-                   
-                    # Ensure the variable exists in the resulting MMM dataset
-                    if var in mmm_ds_for_var:
-                        mmm_seasonal_hist[var] = mmm_ds_for_var[var]
-                        logging.info(f"    MMM for historical {var} calculated using {len(datasets_with_model_dim)} models.")
-                    else: # Check if it got renamed, e.g. if original DataArray had a different name
-                        available_vars = list(mmm_ds_for_var.data_vars.keys())
-                        if len(available_vars) == 1: # If only one var, assume it's the one we want
-                            mmm_seasonal_hist[var] = mmm_ds_for_var[available_vars[0]]
-                            logging.info(f"    MMM for historical {var} (as {available_vars[0]}) calculated using {len(datasets_with_model_dim)} models.")
+            # Sicherstellen, dass model_seasonal_means_hist[var] existiert und ein Dict ist
+            if var in model_seasonal_means_hist and isinstance(model_seasonal_means_hist[var], dict):
+                for model, ds_array in model_seasonal_means_hist[var].items():
+                    if ds_array is not None:
+                        # Sicherstellen, dass ds_array ein DataArray ist und einen Namen hat
+                        if isinstance(ds_array, xr.DataArray):
+                            name_for_da = ds_array.name if ds_array.name else var
+                            if ds_array.name != name_for_da: # Nur umbenennen, wenn nötig
+                                datasets_to_combine_for_var.append(ds_array.rename(name_for_da))
+                            else:
+                                datasets_to_combine_for_var.append(ds_array)
+                            model_names_for_var.append(model)
                         else:
-                             logging.error(f"    ERROR: Variable '{var}' not found in combined MMM Dataset for {var}. Available: {available_vars}")
-                             mmm_seasonal_hist[var] = None
-                except Exception as e_combine:
-                    logging.error(f"    ERROR combining historical data for {var} to create MMM: {e_combine}")
-                    mmm_seasonal_hist[var] = None
+                            logging.warning(f"    Item for model {model}, var {var} is not an xarray.DataArray. Skipping.")
             else:
-                logging.info(f"    Skipping MMM for historical {var}: Not enough valid model data ({len(datasets_as_ds_list)} models).")
+                logging.warning(f"    No data or incorrect data structure in model_seasonal_means_hist for variable '{var}'. Skipping MMM for this var.")
+                mmm_seasonal_hist[var] = None
+                continue
+
+            # Konvertiere DataArrays zu Datasets und füge Modelldimension hinzu
+            datasets_with_model_dim = []
+            if datasets_to_combine_for_var: # Nur wenn es Daten zum Kombinieren gibt
+                for i, da_model in enumerate(datasets_to_combine_for_var):
+                    model_nm = model_names_for_var[i]
+                    # Der Name des DataArrays wird zum Variablennamen im Dataset
+                    datasets_with_model_dim.append(da_model.to_dataset().expand_dims(model=[model_nm]))
+
+
+            if len(datasets_with_model_dim) >= 3: # Mindestens 3 Modelle für MMM
+                # --- START DEBUG LOGGING PRE-COMBINATION ---
+                logging.info(f"  DEBUG: Pre-combination check for variable '{var}':")
+                for i_debug, ds_item_expanded_debug in enumerate(datasets_with_model_dim):
+                    # Der Modellname ist jetzt eine Koordinate in ds_item_expanded_debug
+                    model_name_debug = ds_item_expanded_debug.model.item() 
+                    try:
+                        # Zugriff auf die Variable im Dataset; der Name sollte 'var' sein (z.B. 'ua')
+                        # oder der ursprüngliche Name des DataArrays, falls er nicht 'var' war.
+                        # Wir nehmen an, dass es nur eine Datenvariable pro Dataset in datasets_with_model_dim gibt.
+                        data_var_name_in_ds = list(ds_item_expanded_debug.data_vars.keys())[0]
+                        data_array_to_check = ds_item_expanded_debug[data_var_name_in_ds]
+
+                        if 'lon' in data_array_to_check.coords:
+                            is_mono_debug = data_array_to_check.indexes['lon'].is_monotonic_increasing or data_array_to_check.indexes['lon'].is_monotonic_decreasing
+                            first_few_lons = data_array_to_check.lon.values[:5] if data_array_to_check.lon.size > 0 else "N/A"
+                            last_few_lons = data_array_to_check.lon.values[-5:] if data_array_to_check.lon.size > 5 else "N/A"
+                            logging.info(f"    Model {model_name_debug} ({data_var_name_in_ds}) lon monotonic: {is_mono_debug}. Len: {data_array_to_check.lon.size}. Lons: {first_few_lons}...{last_few_lons}")
+                            if not is_mono_debug and data_array_to_check.lon.size > 0:
+                                logging.error(f"      NON-MONOTONIC LON for {model_name_debug} ({data_var_name_in_ds}) PRE-COMBINE. All lons ({data_array_to_check.lon.size}): {data_array_to_check.lon.values}")
+                                diffs = np.diff(data_array_to_check.lon.values)
+                                non_mono_indices = np.where(diffs <= 0)[0] 
+                                if 'lon' in data_array_to_check.indexes and data_array_to_check.indexes['lon'].is_monotonic_decreasing:
+                                    non_mono_indices = np.where(diffs >=0)[0]
+                                if len(non_mono_indices) > 0:
+                                    problem_idx = non_mono_indices[0]
+                                    context_slice = slice(max(0, problem_idx - 2), problem_idx + 3)
+                                    logging.error(f"        Problematic segment around index {problem_idx}: ...{data_array_to_check.lon.values[context_slice]}...")
+                        else:
+                            logging.info(f"    Model {model_name_debug} ({data_var_name_in_ds}) no 'lon' coord.")
+                    except Exception as e_debug_log:
+                        logging.error(f"    Error in pre-combination debug log for {model_name_debug} (var: {var}): {e_debug_log}")
+                # --- END DEBUG LOGGING PRE-COMBINATION ---
+
+                combined_ds_for_var = None 
+                _join_method_used = "unknown" 
+
+                try:
+                    logging.info(f"    Attempting xr.combine_by_coords for variable '{var}' with join='inner'...")
+                    combined_ds_for_var_raw_inner = xr.combine_by_coords(
+                        datasets_with_model_dim,
+                        compat='override', 
+                        join='inner',      
+                        combine_attrs='drop_conflicts',
+                        coords='minimal' 
+                    )
+                    logging.info(f"    SUCCESS: xr.combine_by_coords (join='inner') for '{var}' completed.")
+                    _join_method_used = "inner"
+                    
+                    if 'lon' in combined_ds_for_var_raw_inner.coords:
+                        lon_index_valid_inner = True
+                        try:
+                            _ = combined_ds_for_var_raw_inner.indexes['lon']
+                        except Exception as e_index_inner:
+                            lon_index_valid_inner = False
+                            logging.error(f"    Could not create/access 'lon' index for 'combined_ds_for_var_raw_inner' ({var}, join='inner'): {e_index_inner}")
+
+                        if lon_index_valid_inner:
+                            is_mono_raw_inner = (combined_ds_for_var_raw_inner.indexes['lon'].is_monotonic_increasing or 
+                                                combined_ds_for_var_raw_inner.indexes['lon'].is_monotonic_decreasing)
+                            logging.info(f"    'combined_ds_for_var_raw_inner' ({var}, join='inner') - lon monotonic: {is_mono_raw_inner}. Len: {combined_ds_for_var_raw_inner.lon.size}. Lons: {combined_ds_for_var_raw_inner.lon.values[:10]}...{combined_ds_for_var_raw_inner.lon.values[-10:]}")
+                            if not is_mono_raw_inner and combined_ds_for_var_raw_inner.lon.size > 0:
+                                    logging.error(f"      RAW COMBINED (inner) LON NON-MONOTONIC for '{var}'. All lons ({combined_ds_for_var_raw_inner.lon.size}): {combined_ds_for_var_raw_inner.lon.values}")
+                    else:
+                        logging.warning(f"    'combined_ds_for_var_raw_inner' ({var}, join='inner') - 'lon' coordinate MISSING.")
+                    
+                    combined_ds_for_var = combined_ds_for_var_raw_inner
+
+                except Exception as e_combine_inner:
+                    logging.error(f"    ERROR during xr.combine_by_coords (join='inner') for {var}: {e_combine_inner}")
+                    logging.error(traceback.format_exc()) 
+                    logging.info(f"    Attempting xr.combine_by_coords for variable '{var}' with join='outer' as fallback...")
+                    try:
+                        combined_ds_for_var_raw_outer = xr.combine_by_coords(
+                            datasets_with_model_dim,
+                            compat='override', 
+                            join='outer', 
+                            combine_attrs='drop_conflicts',
+                            coords='minimal',
+                            fill_value=np.nan 
+                        )
+                        logging.info(f"    SUCCESS: xr.combine_by_coords (join='outer') for '{var}' completed.")
+                        _join_method_used = "outer"
+
+                        if 'lon' in combined_ds_for_var_raw_outer.coords:
+                            lon_index_valid_outer = True
+                            try:
+                                _ = combined_ds_for_var_raw_outer.indexes['lon']
+                            except Exception as e_index_outer:
+                                lon_index_valid_outer = False
+                                logging.error(f"    Could not create/access 'lon' index for 'combined_ds_for_var_raw_outer' ({var}, join='outer'): {e_index_outer}")
+                            
+                            if lon_index_valid_outer:
+                                is_mono_raw_outer = (combined_ds_for_var_raw_outer.indexes['lon'].is_monotonic_increasing or
+                                                     combined_ds_for_var_raw_outer.indexes['lon'].is_monotonic_decreasing)
+                                logging.info(f"    'combined_ds_for_var_raw_outer' ({var}, join='outer') - lon monotonic: {is_mono_raw_outer}. Len: {combined_ds_for_var_raw_outer.lon.size}. Lons: {combined_ds_for_var_raw_outer.lon.values[:10]}...{combined_ds_for_var_raw_outer.lon.values[-10:]}")
+                                if not is_mono_raw_outer and combined_ds_for_var_raw_outer.lon.size > 0:
+                                    logging.error(f"      RAW COMBINED (outer) LON NON-MONOTONIC for '{var}'. All lons ({combined_ds_for_var_raw_outer.lon.size}): {combined_ds_for_var_raw_outer.lon.values}")
+                        else:
+                                logging.warning(f"    'combined_ds_for_var_raw_outer' ({var}, join='outer') - 'lon' coordinate MISSING.")
+                        combined_ds_for_var = combined_ds_for_var_raw_outer
+                    except Exception as e_combine_outer:
+                        logging.error(f"    ERROR during xr.combine_by_coords (join='outer') fallback for {var}: {e_combine_outer}")
+                        logging.error(traceback.format_exc())
+                        mmm_seasonal_hist[var] = None
+                        continue 
+
+                if combined_ds_for_var is None:
+                    logging.error(f"    Combined_ds_for_var is None for variable '{var}' after all combine attempts. Skipping MMM for this variable.")
+                    mmm_seasonal_hist[var] = None
+                    continue
+
+                if 'lon' in combined_ds_for_var.coords and 'lon' in combined_ds_for_var.dims:
+                    is_monotonic_before_sort = False
+                    lon_index_valid_presort = True
+                    try:
+                        _ = combined_ds_for_var.indexes['lon']
+                    except Exception:
+                        lon_index_valid_presort = False
+                    
+                    if lon_index_valid_presort:
+                        idx_before_sort = combined_ds_for_var.indexes['lon']
+                        is_monotonic_before_sort = idx_before_sort.is_monotonic_increasing or idx_before_sort.is_monotonic_decreasing
+                    else:
+                         logging.warning(f"    'lon' index for combined_ds_for_var ({var}, join='{_join_method_used}') could not be accessed before sort. Attempting sort.")
+
+                    if not is_monotonic_before_sort:
+                        logging.info(f"    Sorting combined dataset for variable '{var}' (from join='{_join_method_used}') by 'lon' as it's not monotonic (is_monotonic_before_sort: {is_monotonic_before_sort}).")
+                        try:
+                            combined_ds_for_var = combined_ds_for_var.sortby('lon')
+                            logging.info(f"    Successfully sorted combined_ds_for_var by 'lon' for '{var}'.")
+                        except Exception as e_sort:
+                            logging.error(f"    ERROR during sortby('lon') for {var}: {e_sort}")
+                            logging.error(traceback.format_exc())
+                            mmm_seasonal_hist[var] = None
+                            continue 
+                    else:
+                        logging.info(f"    Combined dataset for '{var}' (using join='{_join_method_used}') is already monotonic before explicit sortby('lon').")
+                    
+                    # --- START DEBUG LOGGING POST-SORT ---
+                    if 'lon' in combined_ds_for_var.coords and 'lon' in combined_ds_for_var.dims: 
+                        is_monotonic_after_sort = False
+                        lon_index_valid_postsort = True
+                        try:
+                            _ = combined_ds_for_var.indexes['lon']
+                        except Exception:
+                            lon_index_valid_postsort = False
+
+                        if lon_index_valid_postsort:
+                            idx_after_sort = combined_ds_for_var.indexes['lon']
+                            is_monotonic_after_sort = idx_after_sort.is_monotonic_increasing or idx_after_sort.is_monotonic_decreasing
+                        else:
+                            logging.error(f"    'lon' index for combined_ds_for_var ({var}, join='{_join_method_used}') could not be accessed even AFTER sort.")
+                        
+                        first_few_lons_sorted = combined_ds_for_var.lon.values[:5] if combined_ds_for_var.lon.size > 0 else "N/A"
+                        last_few_lons_sorted = combined_ds_for_var.lon.values[-5:] if combined_ds_for_var.lon.size > 5 else "N/A"
+                        logging.info(f"    Combined DS for '{var}' (join='{_join_method_used}') AFTER explicit sortby('lon'), lon monotonic: {is_monotonic_after_sort}. Len: {combined_ds_for_var.lon.size}. Lons: {first_few_lons_sorted}...{last_few_lons_sorted}")
+                        if not is_monotonic_after_sort and combined_ds_for_var.lon.size > 0:
+                            logging.error(f"      LON STILL NON-MONOTONIC for '{var}' (join='{_join_method_used}') POST-SORT. All lons ({combined_ds_for_var.lon.size}): {combined_ds_for_var.lon.values}")
+                    # --- END DEBUG LOGGING POST-SORT ---
+                elif 'lon' not in combined_ds_for_var.coords and combined_ds_for_var is not None : 
+                        logging.warning(f"    Cannot sort combined_ds_for_var by 'lon' for '{var}' (join='{_join_method_used}') - 'lon' is not a coordinate.")
+                
+                if combined_ds_for_var is not None:
+                    # Prüfen, ob 'lon' eine Koordinate ist UND ob sie (nach Sortierung) monoton ist, ODER ob 'lon' gar nicht existiert (Oberflächenvariablen ohne lon?)
+                    condition_for_mmm = False
+                    if 'lon' not in combined_ds_for_var.coords: # Falls lon gar nicht da ist (z.B. globale Mittelwerte)
+                        condition_for_mmm = True
+                        logging.info(f"    Proceeding with MMM calculation for '{var}' as 'lon' coordinate is not present in combined_ds_for_var.")
+                    elif 'lon' in combined_ds_for_var.indexes:
+                        if combined_ds_for_var.indexes['lon'].is_monotonic_increasing or combined_ds_for_var.indexes['lon'].is_monotonic_decreasing:
+                            condition_for_mmm = True
+                        else:
+                            logging.error(f"    Skipping MMM calculation for {var} (join='{_join_method_used}') because 'lon' was not monotonic after sort attempts.")
+                    else: # lon ist Koordinate, aber kein Index (sollte nicht passieren nach sortby, wenn lon Dimension ist)
+                        logging.error(f"    Skipping MMM calculation for {var} (join='{_join_method_used}') because 'lon' is a coordinate but not an index after sort attempts.")
+
+                    if condition_for_mmm:
+                        try:
+                            mmm_ds_for_var = combined_ds_for_var.mean(dim='model', skipna=True)
+                            # Der Name der Datenvariable im mmm_ds_for_var sollte dem Namen der ursprünglichen DataArrays entsprechen
+                            # oder 'var', wenn sie umbenannt wurden.
+                            data_var_name_in_mmm = var 
+                            if not list(mmm_ds_for_var.data_vars.keys()): # Keine Datenvariablen
+                                 logging.error(f"    ERROR: MMM Dataset for {var} (using join='{_join_method_used}') has NO data variables after .mean(dim='model').")
+                                 mmm_seasonal_hist[var] = None
+                            elif data_var_name_in_mmm not in mmm_ds_for_var.data_vars:
+                                # Wenn der erwartete Name nicht da ist, aber nur eine Variable existiert, nimm diese.
+                                if len(mmm_ds_for_var.data_vars) == 1:
+                                    actual_var_name_in_mmm = list(mmm_ds_for_var.data_vars.keys())[0]
+                                    logging.warning(f"    Variable '{data_var_name_in_mmm}' not found in MMM, using existing '{actual_var_name_in_mmm}'.")
+                                    mmm_seasonal_hist[var] = mmm_ds_for_var[actual_var_name_in_mmm]
+                                else:
+                                    logging.error(f"    ERROR: Variable '{data_var_name_in_mmm}' not found in combined MMM Dataset for {var} (using join='{_join_method_used}'). Available: {list(mmm_ds_for_var.data_vars.keys())}")
+                                    mmm_seasonal_hist[var] = None
+                            else:
+                                mmm_seasonal_hist[var] = mmm_ds_for_var[data_var_name_in_mmm]
+                            
+                            if mmm_seasonal_hist.get(var) is not None:
+                                logging.info(f"    MMM for historical {var} (using join='{_join_method_used}') calculated using {len(datasets_with_model_dim)} models.")
+
+                        except Exception as e_mmm_calc:
+                            logging.error(f"    ERROR calculating MMM for {var} (using join='{_join_method_used}') after combination/sort: {e_mmm_calc}")
+                            logging.error(traceback.format_exc())
+                            mmm_seasonal_hist[var] = None
+                    else: # condition_for_mmm war False
+                        mmm_seasonal_hist[var] = None 
+                else: # combined_ds_for_var war None
+                    mmm_seasonal_hist[var] = None
+            else: # Weniger als 3 Modelle
+                logging.info(f"    Skipping MMM for historical {var}: Not enough valid model data ({len(datasets_with_model_dim)} models).")
                 mmm_seasonal_hist[var] = None
 
         # Check if all necessary MMMs were calculated
