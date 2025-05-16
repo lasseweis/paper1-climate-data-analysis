@@ -94,13 +94,88 @@ def run_reanalysis_phase(config: Config):
     reanalysis_phase_results = {}
     climate_analyzer = ClimateAnalysis(config) # Benötigt Config, das jetzt importiert sein sollte
 
-    logging.info("\nStep 1a: Loading ERA5 Data and Calculating ERA5 Jet Indices...")
-    era5_data_loaded, era5_jet_data = climate_analyzer.analyze_reanalysis_data(
-        dataset_name=Config.DATASET_ERA5,
-        variables_to_load=Config.VARIABLES_REANALYSIS_ERA5
-    )
-    reanalysis_phase_results['era5_data_loaded'] = era5_data_loaded
+    # climate_analyzer = ClimateAnalysis(config) # Kann bleiben, falls andere Methoden genutzt werden
+
+    logging.info("\nStep 1a: Loading ERA5 Data...")
+    # Rufen Sie die statische Methode aus ClimateAnalysis auf, um ERA5-Daten zu laden.
+    # Diese Methode gibt ein Dictionary mit den verarbeiteten ERA5-Datensätzen zurück.
+    era5_processed_datasets = ClimateAnalysis.process_era5_data(config) # [1]
+
+    era5_jet_data = {}
+    # Die Struktur für 'era5_data_loaded', wie sie im Rest des Skripts erwartet wird,
+    # ist ein Dictionary, bei dem der Schlüssel der Dataset-Name ist.
+    era5_data_loaded_for_results = {}
+
+    if era5_processed_datasets:
+        # Bereiten Sie era5_data_loaded für die Speicherung und weitere Verwendung vor
+        era5_data_loaded_for_results = {Config.DATASET_ERA5: era5_processed_datasets}
+        
+        logging.info("Calculating ERA5 Jet Indices...")
+        # AdvancedAnalyzer.analyze_jet_indices erwartet die direkt verarbeiteten Datensätze
+        # und den Namen des Datasets.
+        era5_jet_data = AdvancedAnalyzer.analyze_jet_indices(era5_processed_datasets, Config.DATASET_ERA5) # [1] (basierend auf der Logik in climate_analysis_module.py)
+    else:
+        logging.error(f"CRITICAL: ERA5 data loading failed for {Config.DATASET_ERA5}. Cannot calculate jet indices.")
+        # Stellen Sie sicher, dass era5_data_loaded_for_results leer bleibt oder entsprechend behandelt wird,
+        # um Fehler weiter unten zu vermeiden.
+        era5_data_loaded_for_results = {Config.DATASET_ERA5: None}
+
+
+    reanalysis_phase_results['era5_data_loaded'] = era5_data_loaded_for_results
     reanalysis_phase_results['era5_jet_data'] = era5_jet_data
+
+    # Die nachfolgenden Überprüfungen und Verwendungen von era5_data_loaded
+    # sollten mit der neuen Struktur era5_data_loaded_for_results[Config.DATASET_ERA5] arbeiten.
+    # Beispiel:
+    # if not era5_data_loaded_for_results.get(Config.DATASET_ERA5) or not era5_jet_data:
+    #     logging.error(f"CRITICAL: ERA5 data loading or jet index calculation failed for {Config.DATASET_ERA5}. Check logs.")
+    # else:
+    #     logging.info(f"ERA5 data and jet indices processed for {Config.DATASET_ERA5}.")
+    #     logging.debug(f"  ERA5 loaded data keys: {list(era5_data_loaded_for_results.get(Config.DATASET_ERA5, {}).keys())}")
+    #     logging.debug(f"  ERA5 jet data keys: {list(era5_jet_data.keys())}")
+
+    # Anpassungen für beta_obs_slopes_era5:
+    beta_obs_slopes_era5 = {}
+    # Verwenden Sie era5_processed_datasets direkt, wenn es erfolgreich geladen wurde
+    if era5_processed_datasets: # Dies prüft, ob die Daten erfolgreich geladen wurden
+        logging.info("\n  Calculating Reanalysis Beta_obs SLOPES (U850 Box vs. Climate Box Indices)...")
+        # era5_datasets_for_beta_calc sollte das Dictionary der Datasets für ERA5 sein
+        era5_datasets_for_beta_calc = era5_processed_datasets 
+
+        if era5_datasets_for_beta_calc and \
+           'ua850' in era5_datasets_for_beta_calc and \
+           'pr' in era5_datasets_for_beta_calc and \
+           'tas' in era5_datasets_for_beta_calc:
+            
+            beta_obs_slopes_era5 = AdvancedAnalyzer.calculate_beta_obs_slopes_for_era5(
+                era5_datasets_for_beta_calc, 
+                Config.DATASET_ERA5
+            )
+        else:
+            logging.warning(f"Skipping ERA5 Beta_obs SLOPES calculation: Missing one or more required datasets (ua850, pr, tas) within loaded ERA5 data.")
+    else:
+        logging.warning(f"Skipping ERA5 Beta_obs SLOPES calculation: Missing loaded ERA5 data altogether.")
+    # ...
+
+    # Anpassungen für era5_regression_maps:
+    # Die Funktion AdvancedAnalyzer.calculate_regression_maps erwartet laut climate_analysis_module.py
+    # die verarbeiteten Datasets und den Dataset-Namen, nicht die Jet-Daten.
+    # Wenn Ihre Version von calculate_regression_maps in run_reanalysis_analysis.py anders ist (d.h. Jet-Daten benötigt),
+    # dann ist die ursprüngliche Struktur dort korrekt. Hier gehe ich von der Konsistenz mit climate_analysis_module.py aus.
+    era5_regression_maps = {}
+    if era5_processed_datasets: # Verwenden Sie die direkt geladenen Daten
+        logging.info("\n  Calculating Reanalysis U850 vs. Box Index Regression MAPS...")
+        # Annahme: calculate_regression_maps benötigt die geladenen Datensätze und nicht die Jet-Indizes als separates Argument
+        # Falls Ihre Version era5_jet_data erwartet, passen Sie dies an.
+        # Die Signatur in climate_analysis_module.py für AdvancedAnalyzer.calculate_regression_maps ist (all_reanalysis_data_processed, dataset_id_key)
+        # all_reanalysis_data_processed enthält direkt die Datensätze (z.B. 'ERA5_pr_seasonal')
+        era5_regression_maps = AdvancedAnalyzer.calculate_regression_maps(
+            era5_processed_datasets, # Die direkt geladenen Daten für ERA5
+            Config.DATASET_ERA5 
+        )
+    else:
+        logging.warning("Skipping ERA5 Regression MAPS calculation: Missing loaded ERA5 data.")
+    reanalysis_phase_results['era5_regression_maps'] = era5_regression_maps
 
     if not era5_data_loaded.get(Config.DATASET_ERA5) or not era5_jet_data:
         logging.error(f"CRITICAL: ERA5 data loading or jet index calculation failed for {Config.DATASET_ERA5}. Check logs from ClimateAnalysis.")
@@ -172,7 +247,7 @@ if __name__ == "__main__":
     setup_logging(config, log_filename="reanalysis_analysis_log.log")
 
     logging.info(f"Script: {os.path.basename(__file__)}")
-    logging.info(f"Project Base Directory (from Config): {config.BASE_DIR}") # BASE_DIR wird von Config gelesen
+    logging.info(f"Project Base Directory (from Config): {config.PROJECT_BASE_DIR}") # PROJECT_BASE_DIR wird von Config gelesen
     logging.info(f"Plot Output Directory: {config.PLOT_DIR}")
     logging.info(f"Intermediate Results Directory: {config.RESULTS_DIR}")
     logging.info(f"Number of CPUs available: {multiprocessing.cpu_count()}")

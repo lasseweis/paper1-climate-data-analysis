@@ -420,7 +420,7 @@ class AdvancedAnalyzer:
                     if not time_dim:
                         logging.error(f"    Could not find a suitable time dimension in {key} for detrending. Skipping detrend.")
                     else:
-                        detrended_jet_index_da = StatsAnalyzer.detrend_data(jet_index_da, dim=time_dim)
+                        detrended_jet_index_da = DataProcessor.detrend_data(jet_index_da, dim=time_dim)
                         logging.debug(f"    Detrending successful for {key}.")
                 except Exception as e:
                     logging.error(f"    Error detrending jet index {key} for {dataset_name}: {e}. Using raw data instead for detrended version.", exc_info=True)
