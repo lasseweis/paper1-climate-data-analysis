@@ -202,6 +202,7 @@ class StorylineAnalyzer:
             if variable_name_str == 'tas_global':
                 if 'lat' in data_array_var.dims and 'lon' in data_array_var.dims:
                     logging.info(f"  Calculating global mean for tas_global ({model_name_str}) from pre-regridded data.")
+                    original_attrs = data_array_var.attrs  # <-- Hinzufügen: Originalattribute speichern
                     weights = np.cos(np.deg2rad(data_array_var.lat))
                     weights.name = "weights"
                     global_mean_tas = data_array_var.weighted(weights).mean(("lon", "lat"), skipna=True)
@@ -214,11 +215,13 @@ class StorylineAnalyzer:
                         coords_to_drop_with_dims = [coord for coord in global_mean_tas.coords if coord in dims_to_explicitly_remove and coord != 'time']
                         if coords_to_drop_with_dims:
                             try: global_mean_tas = global_mean_tas.drop_vars(coords_to_drop_with_dims, errors='ignore')
-                            except Exception : pass # Ignoriere Fehler beim Droppen von Koordinaten
+                            except Exception : pass 
                         global_mean_tas = global_mean_tas.squeeze(dim=dims_to_explicitly_remove, drop=True)
                     
                     if set(global_mean_tas.dims) != set(target_dims_for_global_mean):
                          raise ValueError(f"Global mean 'tas_global' for {model_name_str} could not be reduced to 1D. Dims: {global_mean_tas.dims}")
+                    
+                    global_mean_tas.attrs = original_attrs  # <-- Hinzufügen: Originalattribute wiederherstellen
                     data_array_var = global_mean_tas
                 elif not ('lat' in data_array_var.dims and 'lon' in data_array_var.dims): 
                     logging.warning(f"  'tas_global' for {model_name_str} (pre-regridded) already seems globally averaged or is missing lat/lon dims. Dims: {data_array_var.dims}.")

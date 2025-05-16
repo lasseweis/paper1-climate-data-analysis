@@ -110,7 +110,7 @@ class Config:
     DATASET_ERA5 = "ERA5"
 
     # --- Computation Parameters ---
-    N_PROCESSES = max(1, multiprocessing.cpu_count() - 4) 
+    N_PROCESSES = 1
 
     # --- CMIP6 Analysis Parameters ---
     CMIP6_SCENARIOS = ['ssp585'] # Szenarien, die geladen werden sollen
