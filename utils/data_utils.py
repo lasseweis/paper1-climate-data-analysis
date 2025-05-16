@@ -634,87 +634,121 @@ class DataProcessor:
             return None
 
     @staticmethod
-    def detrend_data(data_array):
+    def detrend_data(data_array, dim=None):
         """
-        Detrend a time series or a spatial DataArray along the 'season_year' dimension.
+        Detrend a time series or a spatial DataArray along the specified dimension.
         Uses simple linear detrending (subtracts linear fit).
         """
         if data_array is None:
+            logging.warning("detrend_data: Input DataArray is None.") # Hinzugefügt für Klarheit
             return None
 
         try:
-            # Identify the time dimension (should be 'season_year' after seasonal processing)
-            time_dim_name = 'season_year'
-            if time_dim_name not in data_array.dims:
-                potential_time_dims = [d for d in data_array.dims if 'year' in d.lower() or 'time' in d.lower()]
-                if potential_time_dims:
-                    time_dim_name = potential_time_dims[0]
-                    logging.debug(f"detrend_data: Using dimension '{time_dim_name}' as the time axis.")
-                else:
-                    logging.error(f"detrend_data: No suitable time dimension (e.g., 'season_year') found. Dims: {data_array.dims}")
-                    return data_array # Return original if no time dimension
+            time_dim_name = dim
 
+            if time_dim_name is None:
+                logging.debug("detrend_data: 'dim' parameter was not provided. Attempting to infer time dimension.")
+                # Fallback, wenn 'dim' nicht explizit übergeben wird
+                time_dim_name = 'season_year'
+                if time_dim_name not in data_array.dims:
+                    potential_time_dims = [d for d in data_array.dims if 'year' in d.lower() or 'time' in d.lower()]
+                    if potential_time_dims:
+                        time_dim_name = potential_time_dims[0]
+                        logging.debug(f"detrend_data: Using inferred dimension '{time_dim_name}' as the time axis.")
+                    else:
+                        logging.error(f"detrend_data: No suitable time dimension (e.g., 'season_year') found and 'dim' not provided. Dims: {data_array.dims}")
+                        return data_array
+            elif time_dim_name not in data_array.dims:
+                logging.error(f"detrend_data: Provided dimension '{time_dim_name}' not found in DataArray. Dims: {data_array.dims}")
+                return data_array
+            
             if data_array[time_dim_name].size < 2:
-                logging.debug("detrend_data: Not enough time points (<2) to detrend.")
-                return data_array # Cannot detrend with fewer than 2 points
+                logging.debug(f"detrend_data: Not enough time points (<2) along dimension '{time_dim_name}' to detrend.")
+                return data_array
 
-            # Use xarray's polyfit and polyval for detrending if possible (requires dask an numpy >= 1.22 for polyfit on xarray)
-            # For a simpler, more universally compatible approach, use scipy.signal.detrend or manual lstsq.
-            # Here, a manual approach using np.linalg.lstsq for broader compatibility:
+            # Konvertiere die Zeitkoordinatenwerte in einen numerischen Typ für die Regression
+            time_values_raw = data_array[time_dim_name].values
+            years_for_regression = None
+
+            if np.issubdtype(time_values_raw.dtype, np.number):
+                years_for_regression = time_values_raw.astype(np.float64)
+                logging.debug(f"detrend_data: Time coordinate '{time_dim_name}' is already numeric. Casting to float64.")
+            elif time_values_raw.dtype == 'O' and len(time_values_raw) > 0 and hasattr(time_values_raw[0], 'toordinal'):
+                try:
+                    years_for_regression = np.array([dt.toordinal() for dt in time_values_raw], dtype=np.float64)
+                    logging.debug(f"detrend_data: Converted cftime object array for dim '{time_dim_name}' to ordinal float days.")
+                except Exception as e_cftime:
+                    logging.error(f"detrend_data: Failed to convert cftime object array for dim '{time_dim_name}' to ordinal days: {e_cftime}")
+                    return data_array
+            elif np.issubdtype(time_values_raw.dtype, np.datetime64):
+                years_for_regression = time_values_raw.astype('datetime64[D]').astype(np.float64)
+                logging.debug(f"detrend_data: Converted datetime64 array for dim '{time_dim_name}' to float (days since epoch).")
+            else:
+                logging.error(f"detrend_data: Time coordinate '{time_dim_name}' has an unsupported dtype '{time_values_raw.dtype}' for detrending.")
+                return data_array
+
+            if years_for_regression is None:
+                logging.error(f"detrend_data: Internal error - failed to create numeric 'years_for_regression' from time dimension '{time_dim_name}'.")
+                return data_array
             
-            years = data_array[time_dim_name].values
-            if np.isnan(years).any():
-                 logging.warning(f"detrend_data: NaNs found in time coordinate '{time_dim_name}'. Detrending may fail or be inaccurate.")
-                 # Decide whether to return original or proceed with caution
-                 # return data_array
+            if years_for_regression.ndim > 1:
+                years_for_regression = years_for_regression.flatten()
 
-            # Prepare the design matrix for linear regression (time, constant)
-            X = np.vstack([years, np.ones(len(years))]).T
-            
-            # Apply detrending along the time dimension
-            # This can be done by iterating over other dimensions if present.
-            # xarray.apply_ufunc can make this cleaner for multi-dimensional arrays.
+            if np.isnan(years_for_regression).any():
+                 logging.warning(f"detrend_data: NaNs found in the numeric time coordinate '{time_dim_name}'. Detrending may be affected.")
 
-            original_values = data_array.data # Get numpy array
-            # Move time axis to the first position for easier processing
+            X = np.vstack([years_for_regression, np.ones(len(years_for_regression))]).T
+
+            original_data_values = data_array.data
+            if not np.issubdtype(original_data_values.dtype, np.floating):
+                logging.debug(f"detrend_data: Casting data values from {original_data_values.dtype} to float64 for detrending.")
+                original_data_values = original_data_values.astype(np.float64)
+
             time_axis_num = data_array.get_axis_num(time_dim_name)
-            values_time_first = np.moveaxis(original_values, time_axis_num, 0)
+            values_time_first = np.moveaxis(original_data_values, time_axis_num, 0)
             
-            # Reshape to 2D: (time, other_dims_combined)
             original_shape_time_first = values_time_first.shape
             reshaped_values = values_time_first.reshape(original_shape_time_first[0], -1)
             
-            detrended_reshaped_values = np.full_like(reshaped_values, np.nan)
+            detrended_reshaped_values = np.full_like(reshaped_values, np.nan, dtype=np.float64)
 
-            for i in range(reshaped_values.shape[1]): # Iterate over each spatial point/other dim combination
+            for i in range(reshaped_values.shape[1]):
                 y_series = reshaped_values[:, i]
-                valid_mask = np.isfinite(y_series) & np.isfinite(X[:,0]) # Also check X for safety
                 
-                if np.sum(valid_mask) >= 2: # Need at least 2 points for lstsq
+                valid_mask = np.isfinite(y_series) & np.isfinite(X[:,0])
+
+                if np.sum(valid_mask) >= 2:
                     X_valid = X[valid_mask]
                     y_valid = y_series[valid_mask]
                     
-                    # Avoid issues if X_valid or y_valid has no variance
                     if np.var(X_valid[:, 0]) < 1e-10 or np.var(y_valid) < 1e-10:
-                        detrended_reshaped_values[:, i] = y_series # Trend is effectively zero or undefined
+                        current_col_detrended = y_series.copy()
+                        # For constant series or series with no variance in X, trend is effectively y_mean or not well-defined for subtraction.
+                        # Keeping original values if variance is too low.
+                        # Or, if X has variance but y doesn't, trend is zero, so y_valid - 0 = y_valid.
+                        # The original code assigned y_series, which means no change.
+                        # Assigning y_valid to valid points of current_col_detrended:
+                        current_col_detrended[valid_mask] = y_valid
+                        detrended_reshaped_values[:, i] = current_col_detrended
                         continue
                     
                     try:
                         slope, intercept = np.linalg.lstsq(X_valid, y_valid, rcond=None)[0]
-                        trend = slope * years + intercept
-                        # Subtract trend from original series (NaNs will propagate correctly if y_series has them)
-                        detrended_reshaped_values[:, i] = y_series - trend 
+                        trend = slope * X_valid[:,0] + intercept 
+                        
+                        current_col_detrended = y_series.copy()
+                        current_col_detrended[valid_mask] = y_valid - trend
+                        detrended_reshaped_values[:,i] = current_col_detrended
+
                     except np.linalg.LinAlgError:
                         logging.warning(f"detrend_data: Linear algebra error for a series. Keeping original values for this series.")
-                        detrended_reshaped_values[:, i] = y_series # Fallback to original if lstsq fails
-                else: # Not enough valid points
-                    detrended_reshaped_values[:, i] = y_series # Keep original
+                        detrended_reshaped_values[:, i] = y_series 
+                else: 
+                    detrended_reshaped_values[:, i] = y_series
 
-            # Reshape back to (time, other_dims...) and then to original dimension order
             detrended_values_time_first = detrended_reshaped_values.reshape(original_shape_time_first)
             detrended_original_order = np.moveaxis(detrended_values_time_first, 0, time_axis_num)
 
-            # Create new DataArray with detrended values
             detrended_da = xr.DataArray(
                 data=detrended_original_order,
                 coords=data_array.coords,
@@ -724,11 +758,12 @@ class DataProcessor:
             )
             detrended_da.attrs['detrended'] = 'linear'
             
-            if 'dataset_source' in data_array.attrs: # Preserve source
+            if 'dataset_source' in data_array.attrs:
                 detrended_da.attrs['dataset_source'] = data_array.attrs['dataset_source']
             return detrended_da
 
         except Exception as e:
-            logging.error(f"General error in detrend_data: {e}")
+            logging.error(f"General error in detrend_data for dim '{dim}': {e}") # Führe dim im Log ein
+            import traceback # Stelle sicher, dass traceback importiert ist
             traceback.print_exc()
-            return data_array # Return original on error
+            return data_array
