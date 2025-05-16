@@ -199,7 +199,7 @@ class Visualizer:
                         ax, slopes, p_values, lons, lats,
                         f"{dataset_id_str}: U850 vs {var_type.upper()} Box Index",
                         analysis_box_definition, season.upper(), var_type,
-                        ua_seasonal_mean=u_mean, show_jet_info_boxes=True
+                        u_wind_mean_for_contours=u_mean, show_jet_info_boxes=True # <--- Corrected argument name
                     )
                     if plot_objects_for_colorbar[var_type] is None: # Store for colorbar creation
                         plot_objects_for_colorbar[var_type] = plot_obj
